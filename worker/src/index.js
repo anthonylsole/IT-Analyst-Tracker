@@ -7,7 +7,9 @@
 //      React app already expects (get/set/list/delete).
 //   3. Serve the built frontend (the Vite output in /dist) for everything else.
 //
-// Required secrets (set via `wrangler secret put <NAME>`):
+// Required secrets — either method works, the code below handles both:
+//   Plain Worker secret:   wrangler secret put SITE_PASSWORD / SESSION_SECRET
+//   Secrets Store binding: added via the dashboard's Bindings tab
 //   SITE_PASSWORD   - the plaintext password visitors must enter
 //   SESSION_SECRET  - a random string used as the session cookie's value
 //
@@ -18,15 +20,27 @@
 const COOKIE_NAME = "capacity_session";
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 30; // 30 days
 
+// A Secrets Store binding is an object you must call .get() on (async).
+// A plain `wrangler secret put` value is just a string already.
+// This works with either, so it doesn't matter which one was used.
+async function resolveSecret(value) {
+  if (value && typeof value.get === "function") {
+    return await value.get();
+  }
+  return value;
+}
+
 function getCookie(request, name) {
   const header = request.headers.get("Cookie") || "";
   const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-function isAuthenticated(request, env) {
+async function isAuthenticated(request, env) {
   const cookie = getCookie(request, COOKIE_NAME);
-  return cookie !== null && env.SESSION_SECRET && cookie === env.SESSION_SECRET;
+  if (cookie === null) return false;
+  const sessionSecret = await resolveSecret(env.SESSION_SECRET);
+  return Boolean(sessionSecret) && cookie === sessionSecret;
 }
 
 function loginPageHtml(error) {
@@ -97,7 +111,10 @@ async function handleLogin(request, env) {
   const formData = await request.formData();
   const password = formData.get("password") || "";
 
-  if (password !== env.SITE_PASSWORD) {
+  const sitePassword = await resolveSecret(env.SITE_PASSWORD);
+  const sessionSecret = await resolveSecret(env.SESSION_SECRET);
+
+  if (password !== sitePassword) {
     return new Response(loginPageHtml(true), {
       status: 401,
       headers: { "Content-Type": "text/html" },
@@ -108,7 +125,7 @@ async function handleLogin(request, env) {
   headers.set("Location", "/");
   headers.append(
     "Set-Cookie",
-    `${COOKIE_NAME}=${encodeURIComponent(env.SESSION_SECRET)}; HttpOnly; Secure; Path=/; Max-Age=${MAX_AGE_SECONDS}; SameSite=Lax`
+    `${COOKIE_NAME}=${encodeURIComponent(sessionSecret)}; HttpOnly; Secure; Path=/; Max-Age=${MAX_AGE_SECONDS}; SameSite=Lax`
   );
   return new Response(null, { status: 302, headers });
 }
@@ -174,7 +191,7 @@ export default {
       return handleLogin(request, env);
     }
 
-    const authed = isAuthenticated(request, env);
+    const authed = await isAuthenticated(request, env);
 
     if (url.pathname.startsWith("/api/")) {
       if (!authed) return jsonResponse({ error: "unauthorized" }, 401);
