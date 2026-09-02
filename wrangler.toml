@@ -1,4 +1,4 @@
-name = "capacity-tracker"
+name = "it-analyst-tracker"
 main = "worker/src/index.js"
 compatibility_date = "2024-09-23"
 
