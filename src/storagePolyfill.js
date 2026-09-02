@@ -19,10 +19,14 @@ async function apiRequest(path, options) {
     throw new Error("Not authenticated");
   }
   if (res.status === 404) {
-    throw new Error("Not found");
+    const err = new Error("Not found");
+    err.code = "NOT_FOUND"; // normal/expected — key just hasn't been set yet
+    throw err;
   }
   if (!res.ok) {
-    throw new Error(`Storage request failed: ${res.status}`);
+    const err = new Error(`Storage request failed: ${res.status}`);
+    err.code = "REQUEST_FAILED"; // a genuine connectivity/server problem
+    throw err;
   }
   return res.json();
 }
@@ -34,7 +38,11 @@ window.storage = {
       return { key: data.key, value: data.value, shared: true };
     }
     const raw = window.localStorage.getItem(LOCAL_PREFIX + key);
-    if (raw === null) throw new Error("Not found");
+    if (raw === null) {
+      const err = new Error("Not found");
+      err.code = "NOT_FOUND";
+      throw err;
+    }
     return { key, value: raw, shared: false };
   },
 

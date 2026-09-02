@@ -125,12 +125,23 @@ export default function CapacityTracker() {
         }
       }
     } catch (e) {
-      // A fetch error is NOT proof the data doesn't exist — it could be a
-      // transient network hiccup. Never overwrite shared storage here, or
-      // a brief blip could silently wipe out everyone's real data.
-      setLoadError(true);
-      const seed = buildSeedData();
-      setData(seed);
+      if (e && e.code === "NOT_FOUND") {
+        // Normal first-time load (e.g. a brand-new database) — not an error.
+        const seed = buildSeedData();
+        setData(seed);
+        try {
+          await window.storage.set(DATA_KEY, JSON.stringify(seed), true);
+        } catch (e2) {
+          // seed will still show locally even if save fails
+        }
+      } else {
+        // A genuine fetch/connectivity error — NOT proof the data doesn't
+        // exist. Never overwrite shared storage here, or a brief blip could
+        // silently wipe out everyone's real data.
+        setLoadError(true);
+        const seed = buildSeedData();
+        setData(seed);
+      }
     }
     try {
       const res2 = await window.storage.get(USER_KEY, false);
