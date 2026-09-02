@@ -114,6 +114,16 @@ async function handleLogin(request, env) {
   const sitePassword = await resolveSecret(env.SITE_PASSWORD);
   const sessionSecret = await resolveSecret(env.SESSION_SECRET);
 
+  if (!sitePassword || !sessionSecret) {
+    const missing = [!sitePassword && "SITE_PASSWORD", !sessionSecret && "SESSION_SECRET"]
+      .filter(Boolean)
+      .join(" and ");
+    return new Response(
+      `Server misconfigured: ${missing} not set. Add ${missing} as a Worker secret or Secrets Store binding (variable name must match exactly), then redeploy.`,
+      { status: 500, headers: { "Content-Type": "text/plain" } }
+    );
+  }
+
   if (password !== sitePassword) {
     return new Response(loginPageHtml(true), {
       status: 401,
