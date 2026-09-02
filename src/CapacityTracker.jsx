@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Plus, X, Check, AlertTriangle, Gauge, Bell, Download, Upload, History } from "lucide-react";
+import { Plus, X, Check, AlertTriangle, Gauge, Bell, Download, Upload, History, FolderCog, Palette } from "lucide-react";
 
 const PALETTE = [
   "#1F6F63",
@@ -23,6 +23,41 @@ function uid() {
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
+}
+
+// Projects named like "BN – Barrett Integration" or "General – Ecom Projects"
+// share a prefix before the dash. Group by that prefix so related projects
+// get the same color at a glance. A name with no dash is its own group.
+function getProjectGroupKey(name) {
+  const match = name.match(/^(.*?)\s+[–—-]\s+/);
+  return (match ? match[1] : name).trim();
+}
+
+// Picks a color for a project name, reusing the color already assigned to
+// its group if one exists among existingProjects, otherwise handing out the
+// next unused palette color. This keeps colors consistent and meaningful
+// everywhere in the app, no matter when a project was added.
+function colorForProjectName(name, existingProjects) {
+  const groupKey = getProjectGroupKey(name);
+  const sameGroup = existingProjects.find((p) => getProjectGroupKey(p.name) === groupKey);
+  if (sameGroup) return sameGroup.color;
+  const usedColors = new Set(existingProjects.map((p) => p.color));
+  const unused = PALETTE.find((c) => !usedColors.has(c));
+  return unused || PALETTE[existingProjects.length % PALETTE.length];
+}
+
+// Orders a resource's project cards by their current allocation on that
+// project, highest first, so the projects they usually work on (and are
+// most likely updating again this month) surface at the top. Ties break
+// alphabetically by project name.
+function sortProjectsForResource(projects, allocationForResource) {
+  const alloc = allocationForResource || {};
+  return [...projects].sort((a, b) => {
+    const av = alloc[a.id] || 0;
+    const bv = alloc[b.id] || 0;
+    if (bv !== av) return bv - av;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 // Seeded from SharePoint: ITKnowledgeBase / Analyst Allocation page
@@ -66,11 +101,11 @@ function buildSeedData() {
   const idByName = {};
   members.forEach((m) => (idByName[m.name] = m.id));
 
-  const projects = SEED_PROJECT_NAMES.map((name, i) => ({
-    id: uid(),
-    name,
-    color: PALETTE[i % PALETTE.length],
-  }));
+  const projects = [];
+  SEED_PROJECT_NAMES.forEach((name) => {
+    const color = colorForProjectName(name, projects);
+    projects.push({ id: uid(), name, color });
+  });
 
   const allocations = {};
   members.forEach((m) => (allocations[m.id] = {}));
@@ -93,9 +128,7 @@ export default function CapacityTracker() {
   const [saveState, setSaveState] = useState("idle");
   const [currentUserId, setCurrentUserId] = useState("");
   const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [addingProject, setAddingProject] = useState(false);
   const [addingMember, setAddingMember] = useState(false);
-  const [newProjectName, setNewProjectName] = useState("");
   const [newMemberName, setNewMemberName] = useState("");
   const [selfServeUserId, setSelfServeUserId] = useState("");
   const [selfServeSubmitted, setSelfServeSubmitted] = useState(false);
@@ -125,23 +158,12 @@ export default function CapacityTracker() {
         }
       }
     } catch (e) {
-      if (e && e.code === "NOT_FOUND") {
-        // Normal first-time load (e.g. a brand-new database) — not an error.
-        const seed = buildSeedData();
-        setData(seed);
-        try {
-          await window.storage.set(DATA_KEY, JSON.stringify(seed), true);
-        } catch (e2) {
-          // seed will still show locally even if save fails
-        }
-      } else {
-        // A genuine fetch/connectivity error — NOT proof the data doesn't
-        // exist. Never overwrite shared storage here, or a brief blip could
-        // silently wipe out everyone's real data.
-        setLoadError(true);
-        const seed = buildSeedData();
-        setData(seed);
-      }
+      // A fetch error is NOT proof the data doesn't exist — it could be a
+      // transient network hiccup. Never overwrite shared storage here, or
+      // a brief blip could silently wipe out everyone's real data.
+      setLoadError(true);
+      const seed = buildSeedData();
+      setData(seed);
     }
     try {
       const res2 = await window.storage.get(USER_KEY, false);
@@ -322,14 +344,14 @@ export default function CapacityTracker() {
   function addProject(name) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const color = PALETTE[data.projects.length % PALETTE.length];
+    const color = colorForProjectName(trimmed, data.projects);
     const project = { id: uid(), name: trimmed, color };
     persist({ ...data, projects: [...data.projects, project] });
-    setNewProjectName("");
-    setAddingProject(false);
   }
 
-  function removeProject(id) {
+  function removeProject(id, name) {
+    const confirmed = window.confirm(`Remove "${name}"? This will also clear everyone's allocation on this project.`);
+    if (!confirmed) return;
     const allocations = {};
     Object.keys(data.allocations).forEach((mid) => {
       const rest = { ...data.allocations[mid] };
@@ -337,6 +359,16 @@ export default function CapacityTracker() {
       allocations[mid] = rest;
     });
     persist({ ...data, projects: data.projects.filter((p) => p.id !== id), allocations });
+  }
+
+  function recolorProjectsByGroup() {
+    writeBackupSnapshot(data).catch(() => {});
+    const recolored = [];
+    data.projects.forEach((p) => {
+      const color = colorForProjectName(p.name, recolored);
+      recolored.push({ ...p, color });
+    });
+    persist({ ...data, projects: recolored });
   }
 
   function addMember(name) {
@@ -360,9 +392,9 @@ export default function CapacityTracker() {
     // Ensure all seeded projects exist too, so restored allocations have somewhere to land
     const existingProjectNames = new Map(data.projects.map((p) => [p.name, p.id]));
     const newProjects = [];
-    SEED_PROJECT_NAMES.forEach((name, i) => {
+    SEED_PROJECT_NAMES.forEach((name) => {
       if (!existingProjectNames.has(name)) {
-        const color = PALETTE[(data.projects.length + newProjects.length) % PALETTE.length];
+        const color = colorForProjectName(name, [...data.projects, ...newProjects]);
         const project = { id: uid(), name, color };
         newProjects.push(project);
         existingProjectNames.set(name, project.id);
@@ -481,6 +513,8 @@ export default function CapacityTracker() {
     <div className="ct-app">
       <Style />
 
+      <header className="ct-header">
+
       {loadError && (
         <div className="ct-load-error">
           <AlertTriangle size={15} />
@@ -504,68 +538,32 @@ export default function CapacityTracker() {
           </div>
         </div>
         <div className="ct-topbar-actions">
-          {mode === "dashboard" && (
-            <span className={`ct-save ct-save-${saveState}`}>
-              {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : ""}
-            </span>
-          )}
-          {mode === "selfserve" && (
-            <button
-              className="ct-btn ct-mode-toggle"
-              onClick={() => {
-                setMode("dashboard");
-                setSelfServeSubmitted(false);
-              }}
-            >
-              Back to dashboard
-            </button>
-          )}
+          <span className={`ct-save ct-save-${saveState}`}>
+            {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : ""}
+          </span>
         </div>
       </div>
 
-      {mode === "selfserve" ? (
-        <SelfServeForm
-          data={data}
-          selfServeUserId={selfServeUserId}
-          setSelfServeUserId={setSelfServeUserId}
-          setAllocation={setAllocation}
-          setLastUpdated={setLastUpdated}
-          totalFor={totalFor}
-          statusColor={statusColor}
-          saveState={saveState}
-          submitted={selfServeSubmitted}
-          setSubmitted={setSelfServeSubmitted}
-          formatDate={formatDate}
-          isRequestPending={isRequestPending}
-        />
-      ) : (
       <>
       <div className="ct-addrow">
-        {addingProject ? (
-          <div className="ct-inline-form">
-            <input
-              autoFocus
-              placeholder="Project name"
-              value={newProjectName}
-              onChange={(e) => setNewProjectName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addProject(newProjectName);
-                } else if (e.key === "Escape") {
-                  setAddingProject(false);
-                  setNewProjectName("");
-                }
-              }}
-            />
-            <button type="button" className="ct-btn ct-btn-icon" onClick={() => addProject(newProjectName)}><Check size={15} /></button>
-            <button type="button" className="ct-btn ct-btn-icon" onClick={() => { setAddingProject(false); setNewProjectName(""); }}><X size={15} /></button>
-          </div>
-        ) : (
-          <button className="ct-btn" onClick={() => setAddingProject(true)}>
-            <Plus size={14} /> Project
-          </button>
-        )}
+        <button
+          className="ct-btn ct-mode-toggle"
+          onClick={() => {
+            setMode("dashboard");
+            setSelfServeSubmitted(false);
+          }}
+        >
+          <Gauge size={14} /> Dashboard
+        </button>
+
+        <button
+          className="ct-btn"
+          onClick={() => {
+            setMode("manageProjects");
+          }}
+        >
+          <FolderCog size={14} /> Projects
+        </button>
 
         {addingMember ? (
           <div className="ct-inline-form">
@@ -680,7 +678,35 @@ export default function CapacityTracker() {
           )}
         </div>
       )}
+      </>
 
+      </header>
+
+      {mode === "selfserve" ? (
+        <SelfServeForm
+          data={data}
+          selfServeUserId={selfServeUserId}
+          setSelfServeUserId={setSelfServeUserId}
+          setAllocation={setAllocation}
+          setLastUpdated={setLastUpdated}
+          totalFor={totalFor}
+          statusColor={statusColor}
+          saveState={saveState}
+          submitted={selfServeSubmitted}
+          setSubmitted={setSelfServeSubmitted}
+          formatDate={formatDate}
+          isRequestPending={isRequestPending}
+        />
+      ) : mode === "manageProjects" ? (
+        <ProjectsManager
+          data={data}
+          addProject={addProject}
+          removeProject={removeProject}
+          projectTotal={projectTotal}
+          recolorProjectsByGroup={recolorProjectsByGroup}
+        />
+      ) : (
+      <>
       {data.members.length === 0 ? (
         <div className="ct-empty">Add your first teammate to start tracking allocation.</div>
       ) : (
@@ -749,35 +775,16 @@ export default function CapacityTracker() {
                 {data.projects.length === 0 ? (
                   <p className="ct-hint">Add a project below to allocate time against it.</p>
                 ) : (
-                  <div className="ct-sliders">
-                    {data.projects.map((p) => {
+                  <div className="ct-alloc-cards">
+                    {sortProjectsForResource(data.projects, data.allocations[currentUser.id]).map((p) => {
                       const val = (data.allocations[currentUser.id] || {})[p.id] || 0;
                       return (
-                        <div key={p.id} className="ct-slider-stack">
-                          <div className="ct-slider-stack-top">
-                            <span className="ct-dot" style={{ background: p.color }} />
-                            <span className="ct-proj-name-full" title={p.name}>{p.name}</span>
-                          </div>
-                          <div className="ct-slider-stack-bottom">
-                            <input
-                              type="range"
-                              min={0}
-                              max={100}
-                              step={5}
-                              value={val}
-                              onChange={(e) => setAllocation(currentUser.id, p.id, Number(e.target.value))}
-                            />
-                            <input
-                              type="number"
-                              min={0}
-                              max={100}
-                              className="ct-num"
-                              value={val}
-                              onChange={(e) => setAllocation(currentUser.id, p.id, Number(e.target.value))}
-                            />
-                            <span className="ct-pct">%</span>
-                          </div>
-                        </div>
+                        <AllocCard
+                          key={p.id}
+                          project={p}
+                          value={val}
+                          onCommit={(num) => setAllocation(currentUser.id, p.id, num)}
+                        />
                       );
                     })}
                   </div>
@@ -835,7 +842,6 @@ export default function CapacityTracker() {
           </section>
 
           <section className="ct-panel">
-            <h2>Team</h2>
             {data.projects.length === 0 && (
               <p className="ct-hint">Add a project so allocation can be tracked against it.</p>
             )}
@@ -855,7 +861,7 @@ export default function CapacityTracker() {
                           </div>
                           <div className="ct-th-meta-row">
                             <div className={isStale(m.lastUpdated) ? "ct-th-date ct-th-date-stale" : "ct-th-date"} title={isStale(m.lastUpdated) ? "Stale — over 30 days since last update" : "Last updated"}>
-                              {isStale(m.lastUpdated) && <AlertTriangle size={9} />} {formatDate(m.lastUpdated)}
+                              {isStale(m.lastUpdated) && <AlertTriangle size={11} />} {formatDate(m.lastUpdated)}
                             </div>
                             <button
                               type="button"
@@ -869,7 +875,7 @@ export default function CapacityTracker() {
                                   : "Never requested — click to log a request"
                               }
                             >
-                              <Bell size={9} />
+                              <Bell size={11} />
                             </button>
                           </div>
                         </div>
@@ -884,9 +890,6 @@ export default function CapacityTracker() {
                       <td className="ct-td-name" title={p.name}>
                         <span className="ct-dot" style={{ background: p.color }} />
                         <span className="ct-td-name-text">{p.name}</span>
-                        <button className="ct-btn ct-btn-icon ct-remove" onClick={() => removeProject(p.id)} aria-label={`Remove ${p.name}`}>
-                          <X size={12} />
-                        </button>
                       </td>
                       {sortedMembers.map((m) => {
                         const val = (data.allocations[m.id] || {})[p.id] || 0;
@@ -937,9 +940,6 @@ export default function CapacityTracker() {
                       />
                     </div>
                     <span className="ct-fte">{(projectTotal(p.id) / 100).toFixed(1)} FTE</span>
-                    <button className="ct-btn ct-btn-icon ct-remove" onClick={() => removeProject(p.id)} aria-label={`Remove ${p.name}`}>
-                      <X size={13} />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -975,6 +975,50 @@ export default function CapacityTracker() {
   );
 }
 
+function AllocCard({ project, value, onCommit }) {
+  const [localValue, setLocalValue] = useState(String(value));
+
+  useEffect(() => {
+    setLocalValue(String(value));
+  }, [value]);
+
+  function commit() {
+    const num = Number(localValue);
+    if (!Number.isNaN(num)) {
+      onCommit(num);
+    } else {
+      setLocalValue(String(value));
+    }
+  }
+
+  return (
+    <div className="ct-alloc-card">
+      <div className="ct-alloc-card-top">
+        <span className="ct-dot" style={{ background: project.color }} />
+        <span className="ct-alloc-card-name" title={project.name}>{project.name}</span>
+      </div>
+      <div className="ct-alloc-card-bottom">
+        <div className="ct-alloc-card-input">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={localValue}
+            onChange={(e) => setLocalValue(e.target.value)}
+            onBlur={commit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.currentTarget.blur();
+              }
+            }}
+          />
+          <span>%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AllocMessage({ total }) {
   if (total > 100) {
     return (
@@ -987,6 +1031,108 @@ function AllocMessage({ total }) {
     return <div className="ct-msg ct-msg-ok">Fully allocated.</div>;
   }
   return <div className="ct-msg ct-msg-muted">{100 - total}% unallocated.</div>;
+}
+
+function ProjectsManager({ data, addProject, removeProject, projectTotal, recolorProjectsByGroup }) {
+  const [name, setName] = useState("");
+  const [confirmingRecolor, setConfirmingRecolor] = useState(false);
+  const [recolorDone, setRecolorDone] = useState(false);
+
+  function handleAdd() {
+    addProject(name);
+    setName("");
+  }
+
+  function handleConfirmRecolor() {
+    recolorProjectsByGroup();
+    setConfirmingRecolor(false);
+    setRecolorDone(true);
+  }
+
+  return (
+    <div className="ct-projects-manager">
+      <section className="ct-panel">
+        <div className="ct-panel-head-row">
+          <h2>Manage projects</h2>
+          {confirmingRecolor ? (
+            <span className="ct-recolor-confirm">
+              Recolor all projects by name group?
+              <button type="button" className="ct-btn ct-btn-primary ct-btn-icon" onClick={handleConfirmRecolor}>
+                Yes, recolor
+              </button>
+              <button type="button" className="ct-btn ct-btn-icon" onClick={() => setConfirmingRecolor(false)}>
+                Cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="ct-btn ct-restore-btn"
+              onClick={() => {
+                setRecolorDone(false);
+                setConfirmingRecolor(true);
+              }}
+              title="Give every project sharing a name prefix (like &quot;BN –&quot;) the same color"
+            >
+              <Palette size={14} /> Recolor by group
+            </button>
+          )}
+        </div>
+        {recolorDone && (
+          <p className="ct-hint" style={{ color: "var(--c-teal)", marginTop: -4, marginBottom: 10 }}>
+            <Check size={12} style={{ display: "inline", verticalAlign: "-1px" }} /> Done — a backup of the previous colors was saved automatically.
+          </p>
+        )}
+        <p className="ct-hint" style={{ marginBottom: 14 }}>
+          Add new projects or remove ones that are no longer active. Removing a project also clears everyone's allocation on it.
+        </p>
+
+        <div className="ct-inline-form" style={{ marginBottom: 18 }}>
+          <input
+            autoFocus
+            placeholder="New project name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleAdd();
+              }
+            }}
+          />
+          <button type="button" className="ct-btn ct-btn-icon" onClick={handleAdd} title="Add project">
+            <Plus size={15} />
+          </button>
+        </div>
+
+        {data.projects.length === 0 ? (
+          <p className="ct-hint">No projects yet — add your first one above.</p>
+        ) : (
+          <div className="ct-projects-manage-list">
+            {data.projects.map((p) => (
+              <div key={p.id} className="ct-backups-row">
+                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="ct-dot" style={{ background: p.color }} />
+                  {p.name}
+                  <span className="ct-hint" style={{ fontSize: 11.5 }}>
+                    {(projectTotal(p.id) / 100).toFixed(1)} FTE
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="ct-btn ct-btn-icon"
+                  onClick={() => removeProject(p.id, p.name)}
+                  title={`Remove ${p.name}`}
+                >
+                  <X size={13} /> Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
 }
 
 function SelfServeForm({
@@ -1058,41 +1204,19 @@ function SelfServeForm({
             {data.projects.length === 0 ? (
               <p className="ct-hint">No projects have been added yet.</p>
             ) : (
-              <div className="ct-sliders">
-                {data.projects.map((p) => {
+              <div className="ct-alloc-cards">
+                {sortProjectsForResource(data.projects, data.allocations[user.id]).map((p) => {
                   const val = (data.allocations[user.id] || {})[p.id] || 0;
                   return (
-                    <div key={p.id} className="ct-slider-stack">
-                      <div className="ct-slider-stack-top">
-                        <span className="ct-dot" style={{ background: p.color }} />
-                        <span className="ct-proj-name-full" title={p.name}>{p.name}</span>
-                      </div>
-                      <div className="ct-slider-stack-bottom">
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          step={5}
-                          value={val}
-                          onChange={(e) => {
-                            setAllocation(user.id, p.id, Number(e.target.value));
-                            setSubmitted(false);
-                          }}
-                        />
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          className="ct-num"
-                          value={val}
-                          onChange={(e) => {
-                            setAllocation(user.id, p.id, Number(e.target.value));
-                            setSubmitted(false);
-                          }}
-                        />
-                        <span className="ct-pct">%</span>
-                      </div>
-                    </div>
+                    <AllocCard
+                      key={p.id}
+                      project={p}
+                      value={val}
+                      onCommit={(num) => {
+                        setAllocation(user.id, p.id, num);
+                        setSubmitted(false);
+                      }}
+                    />
                   );
                 })}
               </div>
@@ -1137,13 +1261,22 @@ function Style() {
         --c-danger: #C1443C;
         font-family: "IBM Plex Sans", -apple-system, sans-serif;
         color: var(--ink);
-        background: linear-gradient(180deg, #DCEBF7 0%, #FFFFFF 55%);
+        background: linear-gradient(180deg, #90D5FF 0%, #005385 100%);
         padding: 18px;
         border-radius: 14px;
         max-width: 1320px;
         margin: 0 auto;
       }
       .ct-app * { box-sizing: border-box; }
+      .ct-header {
+        background: #5E7380;
+        margin: -18px -18px 18px -18px;
+        padding: 18px 18px 14px;
+        border-radius: 14px 14px 0 0;
+      }
+      .ct-header .ct-brand h1 { color: #fff; }
+      .ct-header .ct-brand p { color: #FFFFFF; }
+      .ct-header .ct-save { color: rgba(255,255,255,0.78); }
       .ct-loading { padding: 40px; text-align: center; color: var(--ink-soft); }
       .ct-load-error {
         display: flex;
@@ -1189,6 +1322,8 @@ function Style() {
       .ct-restore-btn:hover { background: #FBEAC8; }
       .ct-mode-toggle:hover { background: #185349; border-color: #185349; }
       .ct-selfserve { max-width: 560px; margin: 22px auto 0; }
+      .ct-projects-manager { width: 100%; }
+      .ct-projects-manage-list { display: flex; flex-direction: column; gap: 6px; }
       .ct-selfserve-panel h2 { margin-bottom: 4px; }
       .ct-selfserve-submitrow { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
       .ct-btn-primary { background: var(--c-teal); color: #fff; border-color: var(--c-teal); font-weight: 500; padding: 9px 16px; }
@@ -1207,6 +1342,9 @@ function Style() {
       .ct-empty { margin-top: 14px; padding: 20px; text-align: center; border: 1px dashed var(--line); border-radius: 12px; color: var(--ink-soft); font-size: 14px; }
       .ct-panel { margin-top: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; }
       .ct-panel h2 { font-family: "Space Grotesk", sans-serif; font-size: 15px; margin: 0 0 8px; }
+      .ct-panel-head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      .ct-panel-head-row h2 { margin: 0 0 8px; }
+      .ct-recolor-confirm { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-soft); flex-wrap: wrap; }
       .ct-identity-row { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
       .ct-identity { display: flex; align-items: center; gap: 10px; font-size: 13px; }
       .ct-identity label { color: var(--ink-soft); }
@@ -1217,6 +1355,63 @@ function Style() {
       .ct-total { font-family: "IBM Plex Mono", monospace; font-size: 16px; font-weight: 600; }
       .ct-hint { font-size: 13px; color: var(--ink-soft); }
       .ct-sliders { display: flex; flex-direction: column; gap: 4px; }
+      .ct-alloc-cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+        gap: 10px;
+      }
+      .ct-alloc-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+        background: var(--surface);
+        min-height: 92px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .ct-alloc-card-top { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 10px; }
+      .ct-alloc-card-name {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+        line-height: 1.35;
+        white-space: normal;
+        overflow-wrap: break-word;
+        min-width: 0;
+      }
+      .ct-alloc-card-top .ct-dot { margin-top: 4px; flex-shrink: 0; }
+      .ct-alloc-card-bottom { display: flex; align-items: center; }
+      .ct-alloc-card-input {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 3px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 6px 8px;
+        min-width: 0;
+      }
+      .ct-alloc-card-input input {
+        width: 100%;
+        min-width: 0;
+        border: none;
+        text-align: center;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--ink);
+        background: transparent;
+      }
+      .ct-alloc-card-input input:focus { outline: none; }
+      .ct-alloc-card-input input::-webkit-outer-spin-button,
+      .ct-alloc-card-input input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .ct-alloc-card-input input[type=number] { -moz-appearance: textfield; }
+      .ct-alloc-card-input span { font-size: 12px; color: var(--ink-soft); flex-shrink: 0; }
       .ct-slider-row { display: grid; grid-template-columns: 10px 110px 1fr 48px 12px; align-items: center; gap: 10px; padding: 2px 0; }
       .ct-slider-stack { display: flex; flex-direction: column; gap: 3px; padding: 5px 0; border-bottom: 1px solid var(--line); }
       .ct-slider-stack:last-child { border-bottom: none; }
@@ -1245,7 +1440,7 @@ function Style() {
       .ct-req-bell:hover { color: var(--c-teal); }
       .ct-req-bell-active { color: var(--c-amber); }
       .ct-req-bell-active:hover { color: var(--c-teal); }
-      .ct-th-date { font-weight: 400; font-size: 9.5px; color: var(--ink-soft); text-transform: none; white-space: nowrap; }
+      .ct-th-date { font-weight: 500; font-size: 12px; color: rgba(255,255,255,0.9); text-transform: none; white-space: nowrap; }
       .ct-alert-panel { padding: 0; border: none; background: none; }
       .ct-alert { display: flex; align-items: flex-start; gap: 8px; padding: 12px 16px; background: #FBEBE9; color: var(--c-danger); border-radius: 12px; font-size: 12.5px; line-height: 1.5; border: 1px solid #F3C9C5; }
       .ct-alert svg { flex-shrink: 0; margin-top: 2px; }
@@ -1265,33 +1460,36 @@ function Style() {
       .ct-table-wrap::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; }
       .ct-table { border-collapse: collapse; width: 100%; table-layout: fixed; font-size: 12.5px; }
       .ct-table th, .ct-table td { padding: 5px 4px; border-bottom: 1px solid var(--line); text-align: center; }
-      .ct-table thead th { background: #F2F3ED; color: var(--ink-soft); font-weight: 500; font-size: 11.5px; position: sticky; top: 0; }
+      .ct-table thead th { background: #003759; color: #FFFFFF; font-weight: 500; font-size: 11.5px; position: sticky; top: 0; padding-top: 6px; padding-bottom: 6px; }
       .ct-th-name {
         width: 148px;
         text-align: left !important;
         position: sticky;
         left: 0;
-        background: #F2F3ED;
+        background: #003759;
+        color: #FFFFFF;
         z-index: 3;
         padding-right: 10px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        font-size: 19px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
       }
-      .ct-th-proj { width: 40px; position: relative; white-space: nowrap; padding: 0 1px 6px; vertical-align: bottom; }
+      .ct-th-proj { width: 74px; position: relative; white-space: nowrap; padding: 8px 3px; vertical-align: middle; }
       .ct-th-proj-inner { display: flex; flex-direction: column; align-items: center; }
-      .ct-th-name-rotated { height: 78px; display: flex; align-items: flex-end; justify-content: center; overflow: visible; }
+      .ct-th-name-rotated { display: flex; align-items: center; justify-content: center; overflow: visible; }
       .ct-th-name-rotated span {
         display: inline-block;
-        transform: rotate(-40deg);
-        transform-origin: bottom left;
         white-space: nowrap;
         font-size: 12.5px;
         font-weight: 600;
-        color: var(--ink);
+        color: #FFFFFF;
         letter-spacing: -0.01em;
       }
-      .ct-th-meta-row { display: flex; align-items: center; gap: 2px; margin-top: 3px; }
+      .ct-th-meta-row { display: flex; align-items: center; gap: 4px; margin-top: 5px; }
       .ct-th-demand, .ct-td-demand {
         width: 46px;
         position: sticky;
@@ -1302,7 +1500,7 @@ function Style() {
         color: var(--ink-soft);
         box-shadow: -6px 0 6px -6px rgba(0,0,0,0.12);
       }
-      .ct-th-demand { background: #F2F3ED; z-index: 3; }
+      .ct-th-demand { background: #003759; color: #FFFFFF; z-index: 3; font-size: 15px; font-weight: 700; }
       .ct-td-demand { background: var(--surface); }
       .ct-table tbody tr:hover .ct-td-demand { background: #FAFBF7; }
       .ct-td-name {
