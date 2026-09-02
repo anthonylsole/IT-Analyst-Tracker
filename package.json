@@ -1,0 +1,25 @@
+{
+  "name": "capacity-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "worker:dev": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "db:migrate:remote": "wrangler d1 execute capacity_tracker_db --remote --file=./schema.sql",
+    "db:migrate:local": "wrangler d1 execute capacity_tracker_db --local --file=./schema.sql"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "lucide-react": "^0.383.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.0",
+    "wrangler": "^3.78.0"
+  }
+}
