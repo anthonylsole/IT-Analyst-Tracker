@@ -1264,8 +1264,9 @@ function Style() {
         background: linear-gradient(180deg, #90D5FF 0%, #005385 100%);
         padding: 18px;
         border-radius: 14px;
-        max-width: 1320px;
+        max-width: 1600px;
         margin: 0 auto;
+        zoom: 1.2;
       }
       .ct-app * { box-sizing: border-box; }
       .ct-header {
